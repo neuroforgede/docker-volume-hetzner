@@ -31,7 +31,7 @@ func (hd *hetznerDriver) checkBackoff() error {
     now := time.Now()
     if now.Before(hd.nextTry) {
         waitDuration := time.Until(hd.nextTry)
-        return fmt.Errorf("last failure too recent; failed %d times in a row before this; retry after %s", hd.failuresInARow, waitDuration)
+        return fmt.Errorf("last failure too recent; failed %d times in a row before this; retry in %s", hd.failuresInARow, waitDuration)
     }
     return nil
 }
