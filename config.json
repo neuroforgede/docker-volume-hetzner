@@ -18,6 +18,12 @@
       "value": "10"
     },
     {
+      "name": "location",
+      "description": "optional volume location override; must match the Docker node location",
+      "settable": ["value"],
+      "value": ""
+    },
+    {
       "name": "prefix",
       "description": "prefix to use when naming created volumes",
       "settable": ["value"],

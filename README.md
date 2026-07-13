@@ -18,6 +18,10 @@ When using Docker Swarm, this should be done on all nodes in the cluster.
 
 **Important**: the plugin expects the Docker node's `hostname` to match with the name of the server created on Hetzner Cloud. This should usually be the case, unless explicitly changed.
 
+The plugin derives the volume location from the matching server's top-level
+`location` property. This requires `hcloud-go` v2.33.0 or newer because Hetzner
+Cloud removed the deprecated `server.datacenter` property in July 2026.
+
 #### Plugin privileges
 
 During installation, you will be prompted to accept the plugins's privilege requirements. The following are required:
@@ -55,7 +59,7 @@ This will initialize a Hetzner volume named `docker-foo_somevolume` (see the `pr
 
 If the volume `docker-foo_somevolume` does not exist in the Hetzner Cloud project, the plugin will do the following:
 
-1. Create the Hetzner Cloud (HC) volume
+1. Resolve the current server and create the Hetzner Cloud (HC) volume in its location
 2. Attach the created HC volume to the node requesting the creation (when using docker swarm, this will be the manager node being used)
 3. Format the HC volume (using `fstype` option; see below)
 4. `chown` the volume to the appropriate `uid`/`gid` if specified.
@@ -68,6 +72,7 @@ The following options can be passed to the plugin via `docker plugin set` (all n
 
 - **`apikey`** (**required**): authentication token to use when accessing the Hetzner Cloud API
 - **`size`** (optional): size of the volume in GB (default: `10`)
+- **`location`** (optional): volume location override. It must match the Docker node's location; by default, the plugin derives the location from the node.
 - **`fstype`** (optional): filesystem type to be created on new volumes. Currently supported values are `ext{2,3,4}` and `xfs` (default: `ext4`)
 - **`prefix`** (optional): prefix to use when naming created volumes; the final name on the HC side will be of the form `prefix-name`, where `name` is the volume name assigned by `docker` (default: `docker`)
 - **`loglevel`** (optional): the amount of information that will be output by the plugin. Accepts any value supported by [logrus](https://github.com/sirupsen/logrus) (i.e.: `fatal`, `error`, `warn`, `info` and `debug`; default: `warn`)
@@ -75,7 +80,7 @@ The following options can be passed to the plugin via `docker plugin set` (all n
 - **`uid`** (optional): which user id to use by default as owners for the filesystem of newly created volumes
 - **`gid`** (optional): which group id to use by default as owners for the filesystem of newly created volumes
 
-Additionally, `size`, `fstype`, `uid` and `gid` can also be passed as options to the driver via `driver_opts`:
+Additionally, `size`, `location`, `fstype`, `uid` and `gid` can also be passed as options to the driver via `driver_opts`:
 
 ```yaml
 volumes:
@@ -83,12 +88,13 @@ volumes:
     driver: hetzner
     driver_opts:
       size: '42'
+      location: nbg1
       fstype: xfs
       uid: '999'
       gid: '999'
 ```
 
-:warning: Passing any option besides `size`, `fstype`, `uid` and `gid` to the volume definition will have no effect beyond a warning in the logs. Use `docker plugin set` instead.
+:warning: Passing any option besides `size`, `location`, `fstype`, `uid` and `gid` to the volume definition will have no effect beyond a warning in the logs. Use `docker plugin set` instead.
 
 ## Limitations
 

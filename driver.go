@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -22,28 +21,7 @@ var trueVar = true
 var falseVar = false
 
 type hetznerDriver struct {
-	client         hetznerClienter
-	nextTry        time.Time
-	failuresInARow int
-}
-
-func (hd *hetznerDriver) checkBackoff() error {
-    now := time.Now()
-    if now.Before(hd.nextTry) {
-        waitDuration := time.Until(hd.nextTry)
-        return fmt.Errorf("last failure too recent; failed %d times in a row before this; retry in %s", hd.failuresInARow, waitDuration)
-    }
-    return nil
-}
-
-func (hd *hetznerDriver) handleBackoff(err error) {
-	if err == nil {
-		hd.failuresInARow = 0
-	}
-	if err != nil {
-		hd.nextTry = time.Now().Add(time.Duration(int64(math.Pow(2, float64(hd.failuresInARow)))) * time.Second)
-		hd.failuresInARow++
-	}
+	client hetznerClienter
 }
 
 func newHetznerDriver() *hetznerDriver {
@@ -65,6 +43,15 @@ func (hd *hetznerDriver) createInternal(req *volume.CreateRequest) error {
 
 	logrus.Infof("starting volume creation for %q", prefixedName)
 
+	existing, _, err := hd.client.Volume().GetByName(context.Background(), prefixedName)
+	if err != nil {
+		return fmt.Errorf("checking whether volume %q already exists: %w", prefixedName, err)
+	}
+	if existing != nil {
+		logrus.Infof("volume %q already exists; treating create as successful", prefixedName)
+		return nil
+	}
+
 	size, err := strconv.Atoi(getOption("size", req.Options))
 	if err != nil {
 		return fmt.Errorf("converting size %q to int: %w", getOption("size", req.Options), err)
@@ -74,11 +61,15 @@ func (hd *hetznerDriver) createInternal(req *volume.CreateRequest) error {
 	if err != nil {
 		return err
 	}
+	location, err := resolveVolumeLocation(srv, req.Options)
+	if err != nil {
+		return err
+	}
 
 	opts := hcloud.VolumeCreateOpts{
 		Name:     prefixedName,
 		Size:     size,
-		Location: srv.Datacenter.Location, // attach explicitly to be able to wait
+		Location: location, // create separately so we can wait before attaching
 		Labels:   map[string]string{"docker-volume-hetzner": ""},
 	}
 	switch f := getOption("fstype", req.Options); f {
@@ -125,7 +116,7 @@ func (hd *hetznerDriver) createInternal(req *volume.CreateRequest) error {
 		// string to int
 		uintParsed, err := strconv.Atoi(uid)
 		if err != nil {
-			return fmt.Errorf("parsing uid option value as integer: %s: %w", gid, err)
+			return fmt.Errorf("parsing uid option value as integer: %s: %w", uid, err)
 		}
 		gidParsed, err := strconv.Atoi(gid)
 		if err != nil {
@@ -141,13 +132,7 @@ func (hd *hetznerDriver) createInternal(req *volume.CreateRequest) error {
 }
 
 func (hd *hetznerDriver) Create(req *volume.CreateRequest) error {
-	if err := hd.checkBackoff(); err != nil {
-		return err
-	}
-
-	err := hd.createInternal(req)
-	hd.handleBackoff(err)
-	return err
+	return hd.createInternal(req)
 }
 
 func (hd *hetznerDriver) listInternal() (*volume.ListResponse, error) {
@@ -183,13 +168,7 @@ func (hd *hetznerDriver) listInternal() (*volume.ListResponse, error) {
 }
 
 func (hd *hetznerDriver) List() (*volume.ListResponse, error) {
-	if err := hd.checkBackoff(); err != nil {
-		return nil, err
-	}
-
-	resp, err := hd.listInternal()
-	hd.handleBackoff(err)
-	return resp, err
+	return hd.listInternal()
 }
 
 func (hd *hetznerDriver) getInternal(req *volume.GetRequest) (*volume.GetResponse, error) {
@@ -229,13 +208,7 @@ func (hd *hetznerDriver) getInternal(req *volume.GetRequest) (*volume.GetRespons
 }
 
 func (hd *hetznerDriver) Get(req *volume.GetRequest) (*volume.GetResponse, error) {
-	if err := hd.checkBackoff(); err != nil {
-		return nil, err
-	}
-
-	resp, err := hd.getInternal(req)
-	hd.handleBackoff(err)
-	return resp, err
+	return hd.getInternal(req)
 }
 
 func (hd *hetznerDriver) removeInternal(req *volume.RemoveRequest) error {
@@ -281,13 +254,7 @@ func (hd *hetznerDriver) removeInternal(req *volume.RemoveRequest) error {
 }
 
 func (hd *hetznerDriver) Remove(req *volume.RemoveRequest) error {
-	if err := hd.checkBackoff(); err != nil {
-		return err
-	}
-
-	err := hd.removeInternal(req)
-	hd.handleBackoff(err)
-	return err
+	return hd.removeInternal(req)
 }
 
 func (hd *hetznerDriver) pathInternal(req *volume.PathRequest) (*volume.PathResponse, error) {
@@ -304,13 +271,7 @@ func (hd *hetznerDriver) pathInternal(req *volume.PathRequest) (*volume.PathResp
 }
 
 func (hd *hetznerDriver) Path(req *volume.PathRequest) (*volume.PathResponse, error) {
-	if err := hd.checkBackoff(); err != nil {
-		return nil, err
-	}
-
-	resp, err := hd.pathInternal(req)
-	hd.handleBackoff(err)
-	return resp, err
+	return hd.pathInternal(req)
 }
 
 func (hd *hetznerDriver) mountInternal(req *volume.MountRequest) (*volume.MountResponse, error) {
@@ -377,7 +338,7 @@ func (hd *hetznerDriver) mountInternal(req *volume.MountRequest) (*volume.MountR
 		merr = multierror.Append(merr, err)
 	}
 	if !mounted {
-		return nil, fmt.Errorf("mounting %q as any of %s: %w", vol.LinuxDevice, supportedFileystemTypes, err)
+		return nil, fmt.Errorf("mounting %q as any of %s: %w", vol.LinuxDevice, supportedFileystemTypes, merr)
 	}
 
 	logrus.Infof("successfully mounted %q on %q", prefixedName, mountpoint)
@@ -386,13 +347,7 @@ func (hd *hetznerDriver) mountInternal(req *volume.MountRequest) (*volume.MountR
 }
 
 func (hd *hetznerDriver) Mount(req *volume.MountRequest) (*volume.MountResponse, error) {
-	if err := hd.checkBackoff(); err != nil {
-		return nil, err
-	}
-
-	resp, err := hd.mountInternal(req)
-	hd.handleBackoff(err)
-	return resp, err
+	return hd.mountInternal(req)
 }
 
 func (hd *hetznerDriver) unmountInternal(req *volume.UnmountRequest) error {
@@ -440,13 +395,7 @@ func (hd *hetznerDriver) unmountInternal(req *volume.UnmountRequest) error {
 }
 
 func (hd *hetznerDriver) Unmount(req *volume.UnmountRequest) error {
-	if err := hd.checkBackoff(); err != nil {
-		return err
-	}
-
-	err := hd.unmountInternal(req)
-	hd.handleBackoff(err)
-	return err
+	return hd.unmountInternal(req)
 }
 
 func (hd *hetznerDriver) getServerForLocalhost() (*hcloud.Server, error) {
@@ -463,8 +412,35 @@ func (hd *hetznerDriver) getServerForLocalhost() (*hcloud.Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("getting cloud server %q: %w", hostname, err)
 	}
+	if srv == nil {
+		return nil, fmt.Errorf("cloud server %q not found", hostname)
+	}
 
 	return srv, nil
+}
+
+func resolveVolumeLocation(srv *hcloud.Server, opts map[string]string) (*hcloud.Location, error) {
+	if srv == nil {
+		return nil, fmt.Errorf("cannot determine location from a nil cloud server")
+	}
+
+	configured := getOption("location", opts)
+	if configured != "" {
+		if srv.Location != nil && srv.Location.Name != "" && srv.Location.Name != configured {
+			return nil, fmt.Errorf(
+				"configured location %q does not match cloud server %q location %q",
+				configured,
+				srv.Name,
+				srv.Location.Name,
+			)
+		}
+		return &hcloud.Location{Name: configured}, nil
+	}
+
+	if srv.Location == nil || (srv.Location.ID == 0 && srv.Location.Name == "") {
+		return nil, fmt.Errorf("cloud server %q (id=%d) has no location", srv.Name, srv.ID)
+	}
+	return srv.Location, nil
 }
 
 func (hd *hetznerDriver) waitForAction(act *hcloud.Action) error {
@@ -475,7 +451,7 @@ func (hd *hetznerDriver) waitForAction(act *hcloud.Action) error {
 func validateOptions(volume string, opts map[string]string) {
 	for k := range opts {
 		switch k {
-		case "fstype", "size", "uid", "gid": // OK, noop
+		case "fstype", "size", "location", "uid", "gid": // OK, noop
 		default:
 			logrus.Warnf("unsupported driver_opt %q for volume %s", k, volume)
 		}

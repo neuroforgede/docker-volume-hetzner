@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"testing"
 
 	"github.com/docker/go-plugins-helpers/volume"
+	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
 func TestMain(m *testing.M) {
@@ -85,31 +88,177 @@ func Test_unprefixedName(t *testing.T) {
 	}
 }
 
-func Test_hetznerDriver_Create(t *testing.T) {
-	type fields struct {
-		client hetznerClienter
-	}
-	type args struct {
-		req *volume.CreateRequest
-	}
+func Test_resolveVolumeLocation(t *testing.T) {
+	t.Setenv("location", "")
+
+	location := &hcloud.Location{ID: 1, Name: "nbg1"}
+
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
+		name     string
+		server   *hcloud.Server
+		options  map[string]string
+		wantID   int64
+		wantName string
+		wantErr  bool
 	}{
-		// TODO: Add test cases.
+		{
+			name:    "nil server",
+			server:  nil,
+			wantErr: true,
+		},
+		{
+			name:    "nil location",
+			server:  &hcloud.Server{ID: 1, Name: "manager-1"},
+			wantErr: true,
+		},
+		{
+			name: "empty location",
+			server: &hcloud.Server{
+				ID:       1,
+				Name:     "manager-1",
+				Location: &hcloud.Location{},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid location",
+			server: &hcloud.Server{
+				ID:       1,
+				Name:     "manager-1",
+				Location: location,
+			},
+			wantID:   location.ID,
+			wantName: location.Name,
+		},
+		{
+			name: "configured fallback",
+			server: &hcloud.Server{
+				ID:   1,
+				Name: "manager-1",
+			},
+			options:  map[string]string{"location": "nbg1"},
+			wantName: "nbg1",
+		},
+		{
+			name: "configured location mismatch",
+			server: &hcloud.Server{
+				ID:       1,
+				Name:     "manager-1",
+				Location: location,
+			},
+			options: map[string]string{"location": "fsn1"},
+			wantErr: true,
+		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hd := &hetznerDriver{
-				client: tt.fields.client,
+			got, err := resolveVolumeLocation(tt.server, tt.options)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("resolveVolumeLocation() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if err := hd.Create(tt.args.req); (err != nil) != tt.wantErr {
-				t.Errorf("hetznerDriver.Create() error = %v, wantErr %v", err, tt.wantErr)
+			if tt.wantErr {
+				return
+			}
+			if got == nil || got.ID != tt.wantID || got.Name != tt.wantName {
+				t.Errorf(
+					"resolveVolumeLocation() = %v, want id=%d name=%q",
+					got,
+					tt.wantID,
+					tt.wantName,
+				)
 			}
 		})
 	}
+}
+
+func Test_hetznerDriver_Create(t *testing.T) {
+	tests := []struct {
+		name            string
+		existing        *hcloud.Volume
+		getErr          error
+		wantErr         bool
+		wantCreateCalls int
+	}{
+		{
+			name:     "existing volume is idempotent",
+			existing: &hcloud.Volume{ID: 1, Name: "docker-existing"},
+		},
+		{
+			name:    "lookup error is returned",
+			getErr:  errors.New("API unavailable"),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			volumeClient := &fakeVolumeClient{
+				existing: tt.existing,
+				getErr:   tt.getErr,
+			}
+			hd := &hetznerDriver{
+				client: &fakeHetznerClient{volumeClient: volumeClient},
+			}
+			if err := hd.Create(&volume.CreateRequest{Name: "existing"}); (err != nil) != tt.wantErr {
+				t.Errorf("hetznerDriver.Create() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if volumeClient.createCalls != tt.wantCreateCalls {
+				t.Errorf("Volume.Create() calls = %d, want %d", volumeClient.createCalls, tt.wantCreateCalls)
+			}
+		})
+	}
+}
+
+type fakeHetznerClient struct {
+	volumeClient hetznerVolumeClienter
+}
+
+func (c *fakeHetznerClient) Volume() hetznerVolumeClienter {
+	return c.volumeClient
+}
+
+func (c *fakeHetznerClient) Server() hetznerServerClienter {
+	return nil
+}
+
+func (c *fakeHetznerClient) Action() hetznerActionClienter {
+	return nil
+}
+
+type fakeVolumeClient struct {
+	existing    *hcloud.Volume
+	getErr      error
+	createCalls int
+}
+
+func (c *fakeVolumeClient) All(context.Context) ([]*hcloud.Volume, error) {
+	return nil, nil
+}
+
+func (c *fakeVolumeClient) Attach(context.Context, *hcloud.Volume, *hcloud.Server) (*hcloud.Action, *hcloud.Response, error) {
+	return nil, nil, nil
+}
+
+func (c *fakeVolumeClient) ChangeProtection(context.Context, *hcloud.Volume, hcloud.VolumeChangeProtectionOpts) (*hcloud.Action, *hcloud.Response, error) {
+	return nil, nil, nil
+}
+
+func (c *fakeVolumeClient) Create(context.Context, hcloud.VolumeCreateOpts) (hcloud.VolumeCreateResult, *hcloud.Response, error) {
+	c.createCalls++
+	return hcloud.VolumeCreateResult{}, nil, nil
+}
+
+func (c *fakeVolumeClient) Delete(context.Context, *hcloud.Volume) (*hcloud.Response, error) {
+	return nil, nil
+}
+
+func (c *fakeVolumeClient) Detach(context.Context, *hcloud.Volume) (*hcloud.Action, *hcloud.Response, error) {
+	return nil, nil, nil
+}
+
+func (c *fakeVolumeClient) GetByName(context.Context, string) (*hcloud.Volume, *hcloud.Response, error) {
+	return c.existing, nil, c.getErr
 }
 
 // func Test_hetznerDriver_List(t *testing.T) {
