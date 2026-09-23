@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -22,28 +21,7 @@ var trueVar = true
 var falseVar = false
 
 type hetznerDriver struct {
-	client         hetznerClienter
-	nextTry        time.Time
-	failuresInARow int
-}
-
-func (hd *hetznerDriver) checkBackoff() error {
-    now := time.Now()
-    if now.Before(hd.nextTry) {
-        waitDuration := time.Until(hd.nextTry)
-        return fmt.Errorf("last failure too recent; failed %d times in a row before this; retry in %s", hd.failuresInARow, waitDuration)
-    }
-    return nil
-}
-
-func (hd *hetznerDriver) handleBackoff(err error) {
-	if err == nil {
-		hd.failuresInARow = 0
-	}
-	if err != nil {
-		hd.nextTry = time.Now().Add(time.Duration(int64(math.Pow(2, float64(hd.failuresInARow)))) * time.Second)
-		hd.failuresInARow++
-	}
+	client hetznerClienter
 }
 
 func newHetznerDriver() *hetznerDriver {
@@ -58,7 +36,7 @@ func (hd *hetznerDriver) Capabilities() *volume.CapabilitiesResponse {
 	}
 }
 
-func (hd *hetznerDriver) createInternal(req *volume.CreateRequest) error {
+func (hd *hetznerDriver) Create(req *volume.CreateRequest) error {
 	validateOptions(req.Name, req.Options)
 
 	prefixedName := prefixName(req.Name)
@@ -78,12 +56,12 @@ func (hd *hetznerDriver) createInternal(req *volume.CreateRequest) error {
 	opts := hcloud.VolumeCreateOpts{
 		Name:     prefixedName,
 		Size:     size,
-		Location: srv.Datacenter.Location, // attach explicitly to be able to wait
+		Location: srv.Location, // attach explicitly to be able to wait
 		Labels:   map[string]string{"docker-volume-hetzner": ""},
 	}
 	switch f := getOption("fstype", req.Options); f {
 	case "xfs", "ext4":
-		opts.Format = hcloud.Ptr(f)
+		opts.Format = hcloud.String(f)
 	}
 
 	resp, _, err := hd.client.Volume().Create(context.Background(), opts)
@@ -140,17 +118,7 @@ func (hd *hetznerDriver) createInternal(req *volume.CreateRequest) error {
 	return nil
 }
 
-func (hd *hetznerDriver) Create(req *volume.CreateRequest) error {
-	if err := hd.checkBackoff(); err != nil {
-		return err
-	}
-
-	err := hd.createInternal(req)
-	hd.handleBackoff(err)
-	return err
-}
-
-func (hd *hetznerDriver) listInternal() (*volume.ListResponse, error) {
+func (hd *hetznerDriver) List() (*volume.ListResponse, error) {
 	logrus.Infof("got list request")
 
 	vols, err := hd.client.Volume().All(context.Background())
@@ -182,17 +150,7 @@ func (hd *hetznerDriver) listInternal() (*volume.ListResponse, error) {
 	return &resp, nil
 }
 
-func (hd *hetznerDriver) List() (*volume.ListResponse, error) {
-	if err := hd.checkBackoff(); err != nil {
-		return nil, err
-	}
-
-	resp, err := hd.listInternal()
-	hd.handleBackoff(err)
-	return resp, err
-}
-
-func (hd *hetznerDriver) getInternal(req *volume.GetRequest) (*volume.GetResponse, error) {
+func (hd *hetznerDriver) Get(req *volume.GetRequest) (*volume.GetResponse, error) {
 	prefixedName := prefixName(req.Name)
 
 	logrus.Infof("fetching information for volume %q", prefixedName)
@@ -228,17 +186,7 @@ func (hd *hetznerDriver) getInternal(req *volume.GetRequest) (*volume.GetRespons
 	return &resp, nil
 }
 
-func (hd *hetznerDriver) Get(req *volume.GetRequest) (*volume.GetResponse, error) {
-	if err := hd.checkBackoff(); err != nil {
-		return nil, err
-	}
-
-	resp, err := hd.getInternal(req)
-	hd.handleBackoff(err)
-	return resp, err
-}
-
-func (hd *hetznerDriver) removeInternal(req *volume.RemoveRequest) error {
+func (hd *hetznerDriver) Remove(req *volume.RemoveRequest) error {
 	prefixedName := prefixName(req.Name)
 
 	logrus.Infof("starting volume removal for %q", prefixedName)
@@ -280,17 +228,7 @@ func (hd *hetznerDriver) removeInternal(req *volume.RemoveRequest) error {
 	return nil
 }
 
-func (hd *hetznerDriver) Remove(req *volume.RemoveRequest) error {
-	if err := hd.checkBackoff(); err != nil {
-		return err
-	}
-
-	err := hd.removeInternal(req)
-	hd.handleBackoff(err)
-	return err
-}
-
-func (hd *hetznerDriver) pathInternal(req *volume.PathRequest) (*volume.PathResponse, error) {
+func (hd *hetznerDriver) Path(req *volume.PathRequest) (*volume.PathResponse, error) {
 	prefixedName := prefixName(req.Name)
 
 	logrus.Infof("got path request for volume %q", prefixedName)
@@ -303,17 +241,7 @@ func (hd *hetznerDriver) pathInternal(req *volume.PathRequest) (*volume.PathResp
 	return &volume.PathResponse{Mountpoint: resp.Volume.Mountpoint}, nil
 }
 
-func (hd *hetznerDriver) Path(req *volume.PathRequest) (*volume.PathResponse, error) {
-	if err := hd.checkBackoff(); err != nil {
-		return nil, err
-	}
-
-	resp, err := hd.pathInternal(req)
-	hd.handleBackoff(err)
-	return resp, err
-}
-
-func (hd *hetznerDriver) mountInternal(req *volume.MountRequest) (*volume.MountResponse, error) {
+func (hd *hetznerDriver) Mount(req *volume.MountRequest) (*volume.MountResponse, error) {
 	prefixedName := prefixName(req.Name)
 
 	logrus.Infof("received mount request for %q as %q", prefixedName, req.ID)
@@ -385,17 +313,7 @@ func (hd *hetznerDriver) mountInternal(req *volume.MountRequest) (*volume.MountR
 	return &volume.MountResponse{Mountpoint: mountpoint}, nil
 }
 
-func (hd *hetznerDriver) Mount(req *volume.MountRequest) (*volume.MountResponse, error) {
-	if err := hd.checkBackoff(); err != nil {
-		return nil, err
-	}
-
-	resp, err := hd.mountInternal(req)
-	hd.handleBackoff(err)
-	return resp, err
-}
-
-func (hd *hetznerDriver) unmountInternal(req *volume.UnmountRequest) error {
+func (hd *hetznerDriver) Unmount(req *volume.UnmountRequest) error {
 	prefixedName := prefixName(req.Name)
 
 	logrus.Infof("received unmount request for %q as %q", prefixedName, req.ID)
@@ -437,16 +355,6 @@ func (hd *hetznerDriver) unmountInternal(req *volume.UnmountRequest) error {
 	}
 
 	return nil
-}
-
-func (hd *hetznerDriver) Unmount(req *volume.UnmountRequest) error {
-	if err := hd.checkBackoff(); err != nil {
-		return err
-	}
-
-	err := hd.unmountInternal(req)
-	hd.handleBackoff(err)
-	return err
 }
 
 func (hd *hetznerDriver) getServerForLocalhost() (*hcloud.Server, error) {
